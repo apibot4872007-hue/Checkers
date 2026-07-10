@@ -120,4 +120,51 @@ def handle_text(message):
         bot.send_message(message.chat.id, "📤 Paste your full cookie now:")
         return
 
-    try
+    try:
+        cookies = load_cookies(message.text)
+        if not cookies.get("NetflixId"):
+            bot.reply_to(message, "❌ NetflixId not found in message.")
+            return
+        process_cookie(message, cookies)
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error processing: {str(e)[:100]}")
+
+@bot.message_handler(content_types=['document'])
+def handle_document(message):
+    try:
+        file_info = bot.get_file(message.document.file_id)
+        text = bot.download_file(file_info.file_path).decode('utf-8', errors='ignore')
+        cookies = load_cookies(text)
+        if not cookies.get("NetflixId"):
+            bot.reply_to(message, "❌ NetflixId not found in file.")
+            return
+        process_cookie(message, cookies)
+    except Exception as e:
+        bot.reply_to(message, f"❌ File error: {str(e)[:100]}")
+
+def process_cookie(message, cookies):
+    bot.send_chat_action(message.chat.id, 'typing')
+    result = check_account(cookies)
+
+    if not result:
+        bot.reply_to(message, "❌ This cookie is invalid or expired.")
+        return
+
+    text = f"""
+🎬 <b>✅ NETFLIX ACCOUNT CHECKED</b>
+
+👤 Name: <b>{result['name']}</b>
+📧 Email: <code>{result['email']}</code>
+
+🔗 <b>NFT Token Login Links</b>
+    """
+
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🖥 PC Login", url=result["login_pc"]))
+    markup.add(types.InlineKeyboardButton("📱 Phone Login", url=result["login_phone"]))
+    markup.add(types.InlineKeyboardButton("📺 TV Login", url=result["login_tv"]))
+
+    bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=markup)
+
+print("🚀 Bot is Running...")
+bot.infinity_polling()
