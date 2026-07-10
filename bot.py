@@ -25,7 +25,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- CONFIGURATION ---
 # Replace with your actual bot token, or set it via environment variables
-BOT_TOKEN = os.getenv("BOT_TOKEN") or "YOUR_TELEGRAM_BOT_TOKEN"
+BOT_TOKEN = os.getenv("BOT_TOKEN") or "8636160046:AAHNuuDo0H2bMYdpL86L8ukdM6TGfcmlKM8"
 
 # Optional: Add user ID who can manage the bot
 ADMIN_ID = None
