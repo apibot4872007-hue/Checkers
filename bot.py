@@ -213,7 +213,7 @@ def check_account(cookies: dict, proxy=None, timeout=20):
 
 # ================== TELEGRAM BOT ==================
 
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # ← CHANGE THIS
+BOT_TOKEN = "8636160046:AAHNuuDo0H2bMYdpL86L8ukdM6TGfcmlKM8"  # ← CHANGE THIS
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
