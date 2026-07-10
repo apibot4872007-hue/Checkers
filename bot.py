@@ -11,7 +11,7 @@ from telebot import types
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ================== BOT TOKEN ==================
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"   # ← CHANGE THIS
+BOT_TOKEN = "8636160046:AAHNuuDo0H2bMYdpL86L8ukdM6TGfcmlKM8"   # ← CHANGE THIS
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # ================== HELPERS ==================
